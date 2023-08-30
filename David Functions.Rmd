@@ -1,0 +1,179 @@
+---
+title: "Helper Functions"
+output:
+  html_document:
+    df_print: paged
+---
+
+Load Libraries
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(sportyR)
+library(gganimate)
+```
+
+Load and Coalesce Data
+```{r, message=FALSE}
+game_info_full <- list.files('game_info/', full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+
+game_events_full <- list.files('game_events/', full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows() %>% 
+  #order by time stamp and then id column to hopefully fix 1-2-5 vs 1-5-2
+  group_by(game_str) %>%
+  arrange(timestamp, event_code, .by_group = T) %>% 
+  ungroup()
+
+ball_pos_full <- list.files('ball_pos/', full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+
+player_pos_full <- list.files("player_pos/", pattern = "*.csv",
+                              recursive = T, full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+
+```
+
+Given a `game_id` and `play` number, `animate_play` provides an animation
+```{r}
+animate_play <- function(game_id, play) {
+
+# Set the specs for the gif we want to create (lower res to make it run quicker)
+options(gganimate.dev_args = list(width = 3, height = 3, units = 'in', res = 120))
+
+# pre-processing to find even rounding interval
+fps <- player_pos_full %>%
+    filter(game_str == game_id, play_id == play, player_position < 14) %>%
+    mutate(fps = timestamp - lag(timestamp))  %>%
+    count(fps) %>% slice(which.max(n)) %>% pull(fps)
+
+# Get the `play_per_game`
+ ppg <- game_events_full %>% filter(game_str == game_id, play_id == play) %>% 
+   pull(play_per_game) %>% head(1)
+   
+# Combine Data
+tracking_data <- player_pos_full %>%
+  # start with player position data
+  filter(game_str == game_id, play_id == play, player_position < 14) %>%
+  mutate(type = ifelse(player_position %in% c(10:13), "batter", "fielder"),
+         position_z = NA) %>%
+  rename(position_x = field_x, position_y = field_y) %>%
+  # add ball data
+  rbind(
+    (ball_pos_full %>%
+       filter(game_str == game_id, play_id == play) %>%
+       rename(position_x = ball_position_x,
+              position_y = ball_position_y,
+              position_z = ball_position_z) %>%
+       mutate(type = "ball", player_position = NA))
+  )  %>% arrange(timestamp) %>%
+    # align timestamps
+  mutate(timestamp_adj = plyr::round_any(timestamp, fps)) %>%
+  # trim the animation to when the pitch is thrown
+  filter(timestamp >=
+           game_events_full %>%
+           filter(game_str == game_id, play_id == play) %>%
+           select(timestamp) %>%
+           slice(1L) %>%
+           pull()
+           ) %>%
+  mutate(frame_id = match(timestamp_adj, unique(timestamp_adj)))
+
+# make field design
+p <-  geom_baseball(league = "MiLB") +
+  geom_point(data = tracking_data %>%
+               filter(type != "ball"),
+             aes(x = position_x, y = position_y, fill = type),
+             shape = 21, size = 3,
+             show.legend = F) +
+  geom_text(data = tracking_data %>%
+              filter(type == "fielder"),
+            aes(x = position_x, y = position_y, label = player_position),
+            color = "black", size = 2,
+            show.legend = F) +
+  geom_point(data = tracking_data %>%
+               filter(type == "ball"),
+             aes(x = position_x, y = position_y,
+                 size = position_z),
+             fill = "white",
+             shape = 21,
+             show.legend = F) +
+  transition_time(frame_id) +
+  annotate("text", x = c(-150, 150, 0), y = c(10, 10, 400), color = "white",
+           label = c(paste("Play Per Game:", ppg), paste("Play:", play), paste("Game ID:", game_id))) +
+  shadow_wake(0.1, exclude_layer = c(1:16))
+
+max_frame = max(tracking_data$frame_id)
+
+p2 = animate(p, fps = fps, nframes = max_frame)
+
+return(p2)
+}
+
+animate_play("1903_32_TeamNB_TeamA1", 2)
+```
+
+`player_position_definition` and `game_events_definition` are helper functions
+used as term glossaries for `play_by_play`, which translates event codes from 
+a `game_id` and `play` number into human readable text to contextualize play sequences
+
+```{r}
+player_position_definition <- function(code) {
+  switch (as.character(code),
+          "0" = "none",
+          "1" = "Pitcher",
+          "2" = "catcher",
+          "3" = "first baseman",
+          "4" = "second baseman",
+          "5" = "third baseman",
+          "6" = "shortstop",
+          "7" = "left fielder",
+          "8" = "center fielder",
+          "9" = "right fielder",
+          "10"= "batter",
+          "11" = "runner on first base",
+          "12" = "runner on second base",
+          "13" = "runner on third base",
+          "255" = "ball event with no player"
+  )
+}
+
+game_events_definition <- function(code) {
+
+  switch (as.character(code),
+          "1" = "pitch thrown",
+          "2" = "ball acquired",
+          "3" = "throw (ball-in-play)",
+          "4" = "ball hit into play",
+          "5" = "end of play.",
+          "6" = "pickoff throw",
+          "7" = "ball acquired - unknown field position",
+          "8" = "throw (ball-in-play) - unknown field position",
+          "9" = "ball deflection",
+          "10"= "ball deflection off of wall",
+          "11" = "home run",
+          "16" = "ball bounce"
+  )
+}
+
+play_by_play <- function(game_id, play) {
+  
+  vec_2_str <- function(vec, s = " ") {
+    paste(as.character(vec), collapse = s)
+  }
+  
+  game_events_full %>%
+    filter(game_str == game_id, play_id == play) %>%
+    select(event_code, player_position) %>%
+    mutate(event = map_chr(event_code, game_events_definition),
+           player = map_chr(player_position, player_position_definition),
+           pbp = ifelse(player != "none", paste(event, "by", player), event)) %>% 
+    pull(pbp) %>% vec_2_str(", ")
+}
+
+play_by_play("1903_32_TeamNB_TeamA1", 2)
+```
+
