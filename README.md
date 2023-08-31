@@ -1,4 +1,4 @@
-# This Isn't a Stretch: Filling the Vacuum Left by Existing Fielding Metrics
+# This Isn’t a Stretch: Quantifying Ball Acquisition Proficiency to Evaluate Fielders on Assisted Put-Outs
 
 ### Submssion for the 2023 SMT Data Challenge - Graduate Student Division
 
