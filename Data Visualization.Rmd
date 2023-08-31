@@ -189,18 +189,3 @@ OAA_hist <- ggplot(savant_data, aes(x = outs_above_average)) +
   theme(plot.title = element_text(hjust = 0.5))
 ggsave('OAA_hist.png', OAA_hist)
 ```
-
-Histogram of Fielding % Values
-```{r}
-fielding_percentage <- throws_info_with_xCR %>%
-  group_by(first_base) %>%
-  summarize(errors = sum(xCR > 0.7 & was_caught == 0),
-            plays = n_distinct(game_str, play_id),
-            fld_pct = (plays - errors) / plays)
-fld_pct_hist <- ggplot(fielding_percentage, aes(x = fld_pct)) + 
-  geom_histogram(fill = '#66c2a5', color = '#1f78b4', alpha = 0.8) +
-  labs(title = 'Distribution of Fielding Percentage', y = 'Number of Players', x = 'Fielding Percentage') +
-  theme_bw() +
-  theme(plot.title = element_text(hjust = 0.5))
-ggsave('fld_pct_hist.png', fld_pct_hist)
-```
