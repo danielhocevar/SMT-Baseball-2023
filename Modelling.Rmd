@@ -142,9 +142,7 @@ write_csv(throws_info_with_xCR, 'throws_info_with_xCR.csv')
 # Create CAA player rankings
 player_rankings <- throws_info_with_xCR %>%
   group_by(first_base) %>%
-  summarise(CAA = sum(was_caught - xCR),
-            plays = n_distinct(game_str, play_id),
-            CAA_per_play = CAA / plays) %>%
+  summarise(CAA = sum(was_caught - xCR)) %>%
   arrange(desc(CAA))
 write_csv(player_rankings, 'player_rankings.csv')
 ```
