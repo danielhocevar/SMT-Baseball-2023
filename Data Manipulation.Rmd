@@ -18,16 +18,6 @@ ball_info_folder <- here(data_folder, "ball_pos")
 ball_pos <- list.files(here(ball_info_folder), full.names = T) %>%
   lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
   bind_rows()
-
-player_pos <- list.files('C:/Users/barto/Downloads/Sports Analytics/SMT 2023/Provided Data/smt_data_challenge_2023/player_pos', pattern = '*.csv',
-                              recursive = T, full.names = T) %>% #head() %>%
-  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
-  bind_rows()
-
-game_events <- list.files('C:/Users/barto/Downloads/Sports Analytics/SMT 2023/Provided Data/smt_data_challenge_2023/game_events',
-                              recursive = T, full.names = T) %>% #head() %>%
-  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
-  bind_rows()
 ```
 
 Load the dataframe that has the identified throws to first.
