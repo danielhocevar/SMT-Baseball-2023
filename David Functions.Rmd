@@ -24,7 +24,7 @@ game_events_full <- list.files('game_events/', full.names = T) %>%
   #order by time stamp and then id column to hopefully fix 1-2-5 vs 1-5-2
   group_by(game_str) %>%
   arrange(timestamp, event_code, .by_group = T) %>% 
-  ungroup()
+  ungroup() %>% mutate(index = row_number())
 
 ball_pos_full <- list.files('ball_pos/', full.names = T) %>%
   lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
@@ -175,5 +175,48 @@ play_by_play <- function(game_id, play) {
 }
 
 play_by_play("1903_32_TeamNB_TeamA1", 2)
+```
+
+The following code chunk gets the defensive touch proportions for each position.
+Assuming no errors in the data,
+there will be *at most* 1 batted ball acquisition per play. By isolating
+those defensive touch types, every other ball acquisition must come from a throw.
+```{r, warning=FALSE}
+batted_ball_acquisition_index <- function(play_sequence) {
+  # get batted ball location
+  bb <- play_sequence %>% filter(event_code == 4) %>% pull(index)
+  
+  # find row of who caught it
+  for(i in (bb+1):max(play_sequence$index)) {
+    if(game_events_full$event_code[i] == 2) {
+      return(game_events_full$index[i])
+    }
+  }
+}
+
+batted_ball_acquisitions <- game_events_full %>% group_by(game_str, play_id) %>%
+  filter(any(event_code == 4), between(player_position,3,10)) %>% 
+  group_map(~batted_ball_acquisition_index(.x)) %>% unlist()
+
+#defensive_touches <- 
+  game_events_full %>% 
+  mutate(batted_ball_acquisition = ifelse(index %in% batted_ball_acquisitions, T, F)) %>% 
+  filter(between(player_position,3,9), event_code %in% c(2,3,7)) %>% 
+  mutate(player_position = sapply(player_position, player_position_definition),  
+         touch_type = case_when(
+    event_code == 2 & batted_ball_acquisition ~ "Batted Ball Acquisition",
+    event_code == 2 & !batted_ball_acquisition ~ "Thrown Ball Acquisition",
+    event_code == 3 ~ "Thrown Ball"
+  )
+           ) %>%
+  select(player_position, touch_type) %>% 
+    rename("Player Position" = player_position,
+           "Proportion of Defensive Touches (%)" = touch_type) %>%
+    table() %>% 
+    prop.table(1) %>% 
+    `*`(100) %>%
+    round(2)
+
+
 ```
 
