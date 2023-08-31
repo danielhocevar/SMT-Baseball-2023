@@ -1,0 +1,206 @@
+Load libraries
+```{r}
+library(tidyverse)
+library(readxl)
+library(readr)
+library(dplyr)
+library(ggplot2) # For scatterplot
+library(sportyR) # For baseball field
+library(rgl) # For interactive 3D Plot
+```
+
+Load dataframe with throws to first, delete unused plays, and load dataframe with information of every throw, including xCR.
+```{r}
+throws_to_first <- read_xlsx('throws_to_first.xlsx')
+throws_to_first <- throws_to_first[!(throws_to_first$game_str == '1902_17_TeamMB_TeamA1' & throws_to_first$play_id == 155) # Pitcher covers first 
+  & !(throws_to_first$game_str == '1903_09_TeamNJ_TeamB' & (throws_to_first$play_id == 156 # Second baseman covers first
+  | throws_to_first$play_id == 215))  # Second baseman covers first
+  & !(throws_to_first$game_str == '1902_18_TeamMB_TeamA1' & throws_to_first$play_id == 31) # First base cutoff
+  & !(throws_to_first$game_str == '1903_19_TeamNL_TeamB' & throws_to_first$play_id == 304) # First base cutoff
+  & !(throws_to_first$game_str == '1903_24_TeamNA_TeamA1' & throws_to_first$play_id == 76), ] # First base back pick from catcher
+throws_info_with_xcR <- read_csv('throws_info_with_xcR.csv')
+```
+
+2D caught throw locations with xCR colours (spray chart)
+```{r}
+# Definition of a catch as previously defined in Data Manipulation
+caught_throws <- throws_info_with_xcR %>%
+  left_join(throws_to_first, throws_info_with_xcR, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  filter(was_caught == 1 & ((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]')) & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])))
+caught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(caught_throws$ball_x), max(caught_throws$ball_x)), ylims = c(min(caught_throws$ball_y) - 2, max(caught_throws$ball_y) + 5)) +
+  geom_point(data = caught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+                 color = xCR),
+             alpha = 0.5,
+             size = 3) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') + # Colour scale from 0 (red) to 1 (blue)
+  labs(color = 'xCR') +
+  geom_text(aes(x = 62.5, y = 75, label = 'Caught Throws to First Base'), color = 'black', size = 8)
+ggsave('caught_throws_plot.png', caught_throws_plot)
+```
+
+2D uncaught spray chart
+```{r}
+# Find throw's closest location to first base
+uncaught_throws <- throws_info_with_xcR %>%
+  filter(was_caught == 0) %>%
+  left_join(throws_to_first, uncaught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  slice_min(order_by = ball_dist)
+uncaught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(uncaught_throws$ball_x), max(uncaught_throws$ball_x)), ylims = c(min(uncaught_throws$ball_y) - 2, max(uncaught_throws$ball_y) + 5)) +
+  geom_point(data = uncaught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+             color = xCR),
+             size = 3) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
+  labs(color = 'xCR') +
+  geom_text(aes(x = 63, y = 75, label = 'Uncaught Throws to First Base'), color = 'black', size = 8)
+ggsave('uncaught_throws_plot.png', uncaught_throws_plot)
+```
+
+Interactive 3D caught spray chart
+```{r}
+# Generate a colour scale for 3D plot
+myColorRamp <- function(colors, values) {
+    v <- (values - min(values))/diff(range(values))
+    x <- colorRamp(colors)(v)
+    rgb(x[,1], x[,2], x[,3], maxColorValue = 255)
+}
+cols <- myColorRamp(c('red', 'blue'), caught_throws$xCR) 
+plot3d(x = caught_throws$ball_x,
+       y = caught_throws$ball_y,
+       z = caught_throws$ball_z,
+       main = 'Caught Throws to First Base',
+       xlab = 'Ball x position (ft)',
+       ylab = 'Ball y position (ft)',
+       zlab = 'Ball z position (ft)',
+       box = FALSE,
+       type = 's',
+       size = 0.5,
+       col = cols)
+```
+
+Interactive 3D uncaught spray chart
+```{r}
+cols <- myColorRamp(c('red', 'blue'), uncaught_throws$xCR) 
+plot3d(x = uncaught_throws$ball_x,
+       y = uncaught_throws$ball_y,
+       z = uncaught_throws$ball_z,
+       main = 'Uncaught Throws to First Base',
+       xlab = 'Ball x position (ft)',
+       ylab = 'Ball y position (ft)',
+       zlab = 'Ball z position (ft)',
+       box = FALSE,
+       type = 's',
+       size = 0.5,
+       col = cols)
+```
+
+The player with the 11th best CAA's caught/uncaught spray chart
+```{r}
+eleventh_best_CAA_caught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5722) %>%
+  left_join(throws_to_first, eleventh_best_CAA_caught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  filter(was_caught == 1 & ((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]')) & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])))
+eleventh_best_CAA_uncaught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5722 & was_caught == 0) %>%
+  left_join(throws_to_first, eleventh_best_CAA_uncaught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  slice_min(order_by = ball_dist)
+eleventh_best_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(eleventh_best_CAA_caught_throws$ball_x), max(eleventh_best_CAA_caught_throws$ball_x)), ylims = c(min(eleventh_best_CAA_caught_throws$ball_y) - 2, max(eleventh_best_CAA_caught_throws$ball_y) + 5)) +
+  geom_point(data = eleventh_best_CAA_caught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+             color = xCR),
+             size = 3) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
+  labs(color = 'xCR') +
+  geom_text(aes(x = 63, y = 73, label = 'Player 5722: 11th CAA (1.16)'), color = 'black', size = 10)
+ggsave('eleventh_best_CAA_plot.png', eleventh_best_CAA_plot)
+```
+
+The player with the worst CAA's caught/uncaught spray chart
+```{r}
+worst_CAA_caught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5524) %>%
+  left_join(throws_to_first, worst_CAA_caught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  filter(was_caught == 1 & ((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]')) & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])))
+worst_CAA_uncaught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5524 & was_caught == 0) %>%
+  left_join(throws_to_first, worst_CAA_uncaught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  slice_min(order_by = ball_dist)
+worst_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(worst_CAA_caught_throws$ball_x), max(worst_CAA_caught_throws$ball_x)), ylims = c(min(worst_CAA_caught_throws$ball_y) - 2, max(worst_CAA_caught_throws$ball_y) + 3)) +
+  geom_point(data = worst_CAA_caught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+             color = xCR),
+             size = 3) +
+  geom_point(data = worst_CAA_uncaught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+                 color = xCR),
+             size = 10,
+             shape = 18) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
+  labs(color = 'xCR') +
+  geom_text(aes(x = 60.25, y = 69.5, label = 'Player 5524: Worst CAA (-2.03)'), color = 'black', size = 7)
+ggsave('worst_CAA_plot.png', worst_CAA_plot)
+```
+
+Effect of Ellipsoid on xCR
+```{r}
+ellipsoid_xCR_plot <- ggplot(throws_info_with_xcR, aes(x = Ellipsoid, y = xCR)) +
+  geom_point(color = '#66c2a5') +
+  geom_smooth(method = 'loess', color = '#1f78b4') +
+  labs(title = 'Effect of Ellipsoid Scale Factor on xCR', y = 'xCR', x = 'Ellipsoid Scale Factor') +
+  scale_x_continuous(breaks = seq(0, 10, by = 1)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('ellipsoid_xCR_plot.jpg', ellipsoid_xCR_plot)
+```
+
+Histogram of CAA values
+```{r}
+CAA_hist <- ggplot(player_rankings, aes(x = CAA)) + 
+  geom_histogram(binwidth = 0.1, fill = '#66c2a5', color = '#1f78b4', alpha = 0.8) +
+  labs(title = 'Distribution of CAA', y = 'Number of Players') +
+  scale_x_continuous(breaks = seq(-2, 4, by = 0.5)) +
+  scale_y_continuous(breaks = seq(0, 10, by = 2)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('CAA_hist.png', CAA_hist)
+```
+
+Histogram of OAA Values
+```{r}
+savant_data <- read_csv('outs_above_average.csv')
+OAA_hist <- ggplot(savant_data, aes(x = outs_above_average)) + 
+  geom_histogram(fill = '#66c2a5', color = '#1f78b4', alpha = 0.8) +
+  labs(title = 'Distribution of OAA', y = 'Number of Players', x = 'OAA') +
+  scale_x_continuous(breaks = seq(-80, 120, by = 20)) +
+  scale_y_continuous(breaks = seq(0, 30, by = 5)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('OAA_hist.png', OAA_hist)
+```
+
+Histogram of Fielding % Values
+```{r}
+fielding_percentage <- throws_info_with_xCR %>%
+  group_by(first_base) %>%
+  summarize(errors = sum(xCR > 0.7 & was_caught == 0),
+            plays = n_distinct(game_str, play_id),
+            fld_pct = (plays - errors) / plays)
+fld_pct_hist <- ggplot(fielding_percentage, aes(x = fld_pct)) + 
+  geom_histogram(fill = '#66c2a5', color = '#1f78b4', alpha = 0.8) +
+  labs(title = 'Distribution of Fielding Percentage', y = 'Number of Players', x = 'Fielding Percentage') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('fld_pct_hist.png', fld_pct_hist)
+```
