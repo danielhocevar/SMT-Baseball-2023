@@ -7,6 +7,6 @@
 `Analysis Code.rmd` is a self-contained file with the code necessary to reproduce our analysis.
 `Shapes.mlx` is a matlab file used visualize the surface shapes tested with
 
-Example Play Animations Folder contains GIFs of the example play in the paper and four plays with varying xCR levels
+`Example Play Animations Folder` contains GIFs of the example play in the paper and four plays with varying xCR levels
 
-Results Folder contains every throw used with indicator variables and xCR as well as CAA player rankings.
+`Results Folder` contains every throw used with indicator variables and xCR as well as CAA player rankings.
