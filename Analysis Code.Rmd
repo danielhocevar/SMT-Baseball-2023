@@ -1361,16 +1361,16 @@ Catches Above Average Distribution
 
 import pandas as pd
 import matplotlib.pyplot as plt
-xcr = pd.read_csv('./throws_info_w_xcr.csv')
-xcr['diff'] = xcr['was_caught'] - xcr['xcr']
-xcr['Error'] = xcr['diff'] > -0.7
-caa = xcr.groupby('first_base').agg(count=('diff', 'count'), caa=('diff', 'sum'), fp=('Error', 'mean')).reset_index()
+xCR = pd.read_csv('./throws_info_with_xCR.csv')
+xCR['diff'] = xCR['was_caught'] - xCR['xCR']
+xCR['Error'] = xCR['diff'] > -0.7
+caa = xCR.groupby('first_base').agg(count=('diff', 'count'), caa=('diff', 'sum'), fp=('Error', 'mean')).reset_index()
 
 # Create a figure and two subplots side by side
 fig, axs = plt.subplots(1, 2, figsize=(15, 6))  # Adjust the figure size as needed
 
 # Plot the first histogram in the first subplot
-axs[0].hist(caa['caa'], bins=50, color='#66c2a5', edgecolor='#1f78b4'. alpha = 0.8)  # Adjust the number of bins
+axs[0].hist(caa['caa'], bins=50, color='#66c2a5', edgecolor='#1f78b4', alpha = 0.8)  # Adjust the number of bins
 axs[0].set_title('Distribution of CAA')
 axs[0].set_xlabel('CAA')
 axs[0].set_ylabel('Number of Players')
