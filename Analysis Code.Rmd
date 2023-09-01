@@ -1,0 +1,1393 @@
+---
+title: "Analysis Code"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Helper Functions
+
+Load Libraries
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(sportyR)
+library(gganimate)
+library(reticulate)
+```
+
+Load and Coalesce Data
+```{r, message=FALSE}
+game_info_full <- list.files('game_info/', full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+
+game_events_full <- list.files('game_events/', full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows() %>% 
+  #order by time stamp and then id column to hopefully fix 1-2-5 vs 1-5-2
+  group_by(game_str) %>%
+  arrange(timestamp, event_code, .by_group = T) %>% 
+  ungroup() %>% mutate(index = row_number())
+
+ball_pos_full <- list.files('ball_pos/', full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+
+player_pos_full <- list.files("player_pos/", pattern = "*.csv",
+                              recursive = T, full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+
+```
+
+Given a `game_id` and `play` number, `animate_play` provides an animation
+```{r}
+animate_play <- function(game_id, play) {
+
+# Set the specs for the gif we want to create (lower res to make it run quicker)
+options(gganimate.dev_args = list(width = 3, height = 3, units = 'in', res = 120))
+
+# pre-processing to find even rounding interval
+fps <- player_pos_full %>%
+    filter(game_str == game_id, play_id == play, player_position < 14) %>%
+    mutate(fps = timestamp - lag(timestamp))  %>%
+    count(fps) %>% slice(which.max(n)) %>% pull(fps)
+
+# Get the `play_per_game`
+ ppg <- game_events_full %>% filter(game_str == game_id, play_id == play) %>% 
+   pull(play_per_game) %>% head(1)
+   
+# Combine Data
+tracking_data <- player_pos_full %>%
+  # start with player position data
+  filter(game_str == game_id, play_id == play, player_position < 14) %>%
+  mutate(type = ifelse(player_position %in% c(10:13), "batter", "fielder"),
+         position_z = NA) %>%
+  rename(position_x = field_x, position_y = field_y) %>%
+  # add ball data
+  rbind(
+    (ball_pos_full %>%
+       filter(game_str == game_id, play_id == play) %>%
+       rename(position_x = ball_position_x,
+              position_y = ball_position_y,
+              position_z = ball_position_z) %>%
+       mutate(type = "ball", player_position = NA))
+  )  %>% arrange(timestamp) %>%
+    # align timestamps
+  mutate(timestamp_adj = plyr::round_any(timestamp, fps)) %>%
+  # trim the animation to when the pitch is thrown
+  filter(timestamp >=
+           game_events_full %>%
+           filter(game_str == game_id, play_id == play) %>%
+           select(timestamp) %>%
+           slice(1L) %>%
+           pull()
+           ) %>%
+  mutate(frame_id = match(timestamp_adj, unique(timestamp_adj)))
+
+# make field design
+p <-  geom_baseball(league = "MiLB") +
+  geom_point(data = tracking_data %>%
+               filter(type != "ball"),
+             aes(x = position_x, y = position_y, fill = type),
+             shape = 21, size = 3,
+             show.legend = F) +
+  geom_text(data = tracking_data %>%
+              filter(type == "fielder"),
+            aes(x = position_x, y = position_y, label = player_position),
+            color = "black", size = 2,
+            show.legend = F) +
+  geom_point(data = tracking_data %>%
+               filter(type == "ball"),
+             aes(x = position_x, y = position_y,
+                 size = position_z),
+             fill = "white",
+             shape = 21,
+             show.legend = F) +
+  transition_time(frame_id) +
+  annotate("text", x = c(-150, 150, 0), y = c(10, 10, 400), color = "white",
+           label = c(paste("Play Per Game:", ppg), paste("Play:", play), paste("Game ID:", game_id))) +
+  shadow_wake(0.1, exclude_layer = c(1:16))
+
+max_frame = max(tracking_data$frame_id)
+
+p2 = animate(p, fps = fps, nframes = max_frame)
+
+return(p2)
+}
+
+animate_play("1903_32_TeamNB_TeamA1", 2)
+```
+
+`player_position_definition` and `game_events_definition` are helper functions
+used as term glossaries for `play_by_play`, which translates event codes from 
+a `game_id` and `play` number into human readable text to contextualize play sequences
+
+```{r}
+player_position_definition <- function(code) {
+  switch (as.character(code),
+          "0" = "none",
+          "1" = "Pitcher",
+          "2" = "catcher",
+          "3" = "first baseman",
+          "4" = "second baseman",
+          "5" = "third baseman",
+          "6" = "shortstop",
+          "7" = "left fielder",
+          "8" = "center fielder",
+          "9" = "right fielder",
+          "10"= "batter",
+          "11" = "runner on first base",
+          "12" = "runner on second base",
+          "13" = "runner on third base",
+          "255" = "ball event with no player"
+  )
+}
+
+game_events_definition <- function(code) {
+
+  switch (as.character(code),
+          "1" = "pitch thrown",
+          "2" = "ball acquired",
+          "3" = "throw (ball-in-play)",
+          "4" = "ball hit into play",
+          "5" = "end of play.",
+          "6" = "pickoff throw",
+          "7" = "ball acquired - unknown field position",
+          "8" = "throw (ball-in-play) - unknown field position",
+          "9" = "ball deflection",
+          "10"= "ball deflection off of wall",
+          "11" = "home run",
+          "16" = "ball bounce"
+  )
+}
+
+play_by_play <- function(game_id, play) {
+  
+  vec_2_str <- function(vec, s = " ") {
+    paste(as.character(vec), collapse = s)
+  }
+  
+  game_events_full %>%
+    filter(game_str == game_id, play_id == play) %>%
+    select(event_code, player_position) %>%
+    mutate(event = map_chr(event_code, game_events_definition),
+           player = map_chr(player_position, player_position_definition),
+           pbp = ifelse(player != "none", paste(event, "by", player), event)) %>% 
+    pull(pbp) %>% vec_2_str(", ")
+}
+
+play_by_play("1903_32_TeamNB_TeamA1", 2)
+```
+
+The following code chunk gets the defensive touch proportions for each position.
+Assuming no errors in the data,
+there will be *at most* 1 batted ball acquisition per play. By isolating
+those defensive touch types, every other ball acquisition must come from a throw.
+```{r, warning=FALSE}
+batted_ball_acquisition_index <- function(play_sequence) {
+  # get batted ball location
+  bb <- play_sequence %>% filter(event_code == 4) %>% pull(index)
+  
+  # find row of who caught it
+  for(i in (bb+1):max(play_sequence$index)) {
+    if(game_events_full$event_code[i] == 2) {
+      return(game_events_full$index[i])
+    }
+  }
+}
+
+batted_ball_acquisitions <- game_events_full %>% group_by(game_str, play_id) %>%
+  filter(any(event_code == 4), between(player_position,3,10)) %>% 
+  group_map(~batted_ball_acquisition_index(.x)) %>% unlist()
+
+#defensive_touches <- 
+  game_events_full %>% 
+  mutate(batted_ball_acquisition = ifelse(index %in% batted_ball_acquisitions, T, F)) %>% 
+  filter(between(player_position,3,9), event_code %in% c(2,3,7)) %>% 
+  mutate(player_position = sapply(player_position, player_position_definition),  
+         touch_type = case_when(
+    event_code == 2 & batted_ball_acquisition ~ "Batted Ball Acquisition",
+    event_code == 2 & !batted_ball_acquisition ~ "Thrown Ball Acquisition",
+    event_code == 3 ~ "Thrown Ball"
+  )
+           ) %>%
+  select(player_position, touch_type) %>% 
+    rename("Player Position" = player_position,
+           "Proportion of Defensive Touches (%)" = touch_type) %>%
+    table() %>% 
+    prop.table(1) %>% 
+    `*`(100) %>%
+    round(2)
+
+
+```
+
+# Throw Filtering
+
+This section of the file goes through the process taken to filter throws to first base.
+
+Import libraries
+``` {python}
+import pandas as pd
+import numpy as np
+import os
+import ast
+
+```
+
+Import the files
+```{python}
+
+#Get all files in the game events folder -- Folder should simply have all csvs from game events in order
+all_files = os.listdir(r'game_events')
+#Filter out anything that isn't a csv
+game_events_files = list(filter(lambda f: f.endswith('.csv'), all_files))
+
+#Get all files in the player position folder -- Folder should simply have all csvs from player position in order
+all_files = os.listdir(r'player_pos')
+#Filter out anything that isn't a csv
+player_pos_files = list(filter(lambda f: f.endswith('.csv'), all_files))
+
+#Get all files in the ball position folder -- Folder should simply have all csvs from ball position in order
+all_files = os.listdir(r'\ball_pos')
+#Get rid of anything that isn't a csv
+ball_pos_files = list(filter(lambda f: f.endswith('.csv'), all_files))
+```
+
+Initial Filtering
+
+```{python}
+
+#Iterate over each set of files
+for game in range(len(game_events_files)):
+    #Print just so I know how far along we are.
+    print(game)
+    #Create temporary dataframe
+    data_temp = pd.DataFrame()
+    #Set dataframe columns
+    data_temp['timestamp_rounded'] = ''
+    data_temp['timestamp'] = ''
+    data_temp['play_id'] = ''
+    data_temp['game_str'] = ''
+    data_temp['events'] = ''
+    data_temp['player_position'] = ''
+    data_temp['player_x'] = ''
+    data_temp['player_y'] = ''
+    data_temp['player_ids'] = ''
+    data_temp['ball_coords'] = ''
+
+    #Read in game events, player position and ball position files for corresponding game
+    gameev = pd.read_csv(r"C:\Users\jaden\OneDrive - University of Toronto\UTSPAN\Carnegie Mellon\Data\SMT-Data-Challenge\smt_data_challenge_2023\game_events\\" + str(game_events_files[game]), encoding = 'latin-1')
+    playerinf = pd.read_csv(r"C:\Users\jaden\OneDrive - University of Toronto\UTSPAN\Carnegie Mellon\Data\SMT-Data-Challenge\smt_data_challenge_2023\player_pos\\" + str(player_pos_files[game]), encoding = 'latin-1')
+    ballinf = pd.read_csv(r"C:\Users\jaden\OneDrive - University of Toronto\UTSPAN\Carnegie Mellon\Data\SMT-Data-Challenge\smt_data_challenge_2023\ball_pos\\" + str(ball_pos_files[game]), encoding = 'latin-1')
+    #Adjust timestamps to be rounded
+    playerinf['timestamp_rounded'] = (np.ceil(playerinf['timestamp'] / 30 + 0.5) * 30).astype(int)
+    gameev['timestamp_rounded'] = (np.ceil(gameev['timestamp'] / 30 + 0.5) * 30).astype(int)
+    #Sort by timestamp and then eventcode
+    gameev.sort_values(['timestamp_rounded', 'event_code'],ascending = [True, True], inplace = True)
+    ballinf['timestamp_rounded'] = (np.ceil(ballinf['timestamp'] / 30 + 0.5) * 30).astype(int)
+    #Get list of all unique timestamps.
+    times = np.unique(playerinf['timestamp_rounded'])
+    #Drop extra row index
+    playerinf.drop(playerinf.columns[0], axis=1, inplace=True)
+    gameev.drop(gameev.columns[0], axis=1, inplace=True)
+    ballinf.drop(ballinf.columns[0], axis=1, inplace=True)
+    
+    for i in range(len(times)):
+        #Set time and empty lists
+        time = times[i]
+        timeog = []
+        row = []
+        player_x = []
+        player_y = []
+        player_id = []
+        ball_pos = []
+        event = []
+        event_pl = []
+        playerinds = playerinf.index[playerinf['timestamp_rounded'] == time].tolist()
+        
+        #Go through each player by position and add the players x and y coordinates to list in the same spot
+        for ind in playerinds:
+            player_id += [playerinf.loc[ind,'player_position']]
+            player_x += [playerinf.loc[ind,'field_x']]
+            player_y += [playerinf.loc[ind,'field_y']]
+        #Find ball info
+        ball_ind = ballinf.index[ballinf['timestamp_rounded'] == time].tolist()
+        
+        #If ball info exists, add it to the ball position list in the order x,y,z
+        if len(ball_ind) > 0:
+            ball_pos += [ballinf.loc[ball_ind[0],'ball_position_x']]
+            ball_pos += [ballinf.loc[ball_ind[0],'ball_position_y']]
+            ball_pos += [ballinf.loc[ball_ind[0],'ball_position_z']]
+            #Add original timestamp so that we can calculate valocity later
+            timeog = ballinf.loc[ball_ind[0],'timestamp']
+        
+        #Get play id and game string from player position info
+        if len(playerinds) > 0:
+            play_id = playerinf.loc[playerinds[len(playerinds) - 1],'play_id']
+            game_id = playerinf.loc[playerinds[len(playerinds) - 1],'game_str']
+        #Get events that occur at the same time
+        event_ind = gameev.index[gameev['timestamp_rounded'] == time].tolist()
+        
+        #Iterate through each event and add it to the list, as well as the involved player in a seperate list
+        if len(event_ind) > 0:
+            for ev in event_ind:
+                event += [gameev.loc[ev,'event_code']]
+                event_pl += [gameev.loc[ev,'player_position']]
+        #Add new row to final dataframe
+        data_temp.loc[i] = [time,timeog,play_id,game_id,event,event_pl,player_x,player_y,player_id,ball_pos]
+        
+    #Iterate through dataframe to find any throws that aren't thrown by the first baseman
+    data_temp['event_seq'] = ''
+    data_temp['player_seq'] = ''
+    
+    #Throws will be the final dataframe which only includes plays in which throws were made (not by the first baseman)
+    throws = pd.DataFrame()
+    throws['timestamp_rounded'] = ''
+    throws['timestamp'] = ''
+    throws['play_id'] = ''
+    throws['game_str'] = ''
+    throws['events'] = ''
+    throws['player_position'] = ''
+    throws['player_x'] = ''
+    throws['player_y'] = ''
+    throws['player_ids'] = ''
+    throws['ball_coords'] = ''
+    throws['event_seq'] = ''
+    throws['player_seq'] = ''
+    
+    #Go through each unique play and create a list of every event and involved player in that play
+    for play in np.unique(data_temp['play_id']):
+        #Get all indices of the play
+        inds = data_temp.index[data_temp['play_id'] == play].tolist()
+        event_seq = []
+        player_seq = []
+        
+        #Iterate through play and create list of events and involved players.
+        for i in inds:
+            event_seq += data_temp.loc[i,'events']
+            player_seq += data_temp.loc[i,'player_position']
+        
+        #If there is a throw in event sequences
+        if (3 in event_seq) or (6 in event_seq) or (8 in event_seq):
+            #Iterate until you find the throw
+            for e in range(len(event_seq)):
+                if event_seq[e] == 3 or event_seq[e] == 6 or event_seq[e] == 8:
+                    #if a throw is made and not by the first baseman
+                    
+                    if player_seq[e] != 3:
+                        #Add event sequence and player sequence to dataframe
+                        data_temp.at[inds[0],'event_seq'] = str(event_seq)
+                        data_temp.at[inds[0],'player_seq'] = str(player_seq)
+                        for j in inds:
+                            #Add play to throws dataframe
+                            throws.loc[j] = data_temp.loc[j]
+                        #End loop because there was a throw not made by first baseman
+                        break
+                    else:
+                        pass
+    
+    #Either intialize or concatenate final dataframe
+    if game == 0:
+        data = throws
+    else:
+        data = pd.concat([data,throws])
+
+```
+
+```{python }
+
+#Set basecoordinates and distance from base
+#In this case its currently set to be more than 45 feet away from home plate
+basex = 0
+basey = 0
+maxdist = 45
+
+#Change dataframe name as to not break everything, as this was originally done in multiple files
+throws = data.reset_index()
+throws['events'] = throws['events'].astype(str)
+throws['player_position'] = throws['player_position'].astype(str)
+throws['ball_coords'] = throws['ball_coords'].astype(str)
+throws['player_ids'] = throws['player_ids'].astype(str)
+throws['player_x'] = throws['player_x'].astype(str)
+throws['player_y'] = throws['player_y'].astype(str)
+throws['throw_id'] = ''
+
+#Group by game
+games_temp = throws.groupby('game_str').groups
+games = []
+#Create list of games to iterate through
+for group in games_temp:
+    games += [throws.loc[games_temp[group],:]]
+
+#Create final list of throws
+throws_final = []
+#j is the throw id (stats at one and increases by one every throw) which should probably have a better name
+j = 1
+
+
+```
+
+
+```{python}
+
+#Iterate through each game
+for game in games:
+    game_temp = game.reset_index(drop  =True)
+    g = game_temp['game_str'][0]
+    print(g)
+    
+    #Go through each play in the game
+    for play in np.unique(game['play_id']):
+        #Get all indices of the play
+        throw_inds = throws.index[(throws['play_id'] == play) & (throws['game_str'] == g) & ((throws['events'] == '[3]') | (throws['events'] == '[6]') | (throws['events'] == '[8]'))].tolist()
+        if len(throw_inds) == 0:
+            print(play)
+            start = 10000000000
+        
+        #The general case, get time of first throw
+        else:
+            start = throws.loc[throw_inds[0], 'timestamp_rounded']
+
+        #Catches made after the first throw, to exclude catches made by the catcher after a pitch
+        catch_inds = throws.index[(throws['play_id'] == play) & (throws['game_str'] == g) & ((throws['events'] == '[2]') | (throws['events'] == '[2, 5]') | (throws['events'] == '[5, 2]')) & (throws['timestamp_rounded'] >= start)].tolist()
+        
+        #If the number of throws is the same as the number of catches, ie ball is acquired after every throws
+        if len(throw_inds) == len(catch_inds) and len(throw_inds) != 0:
+            #Go through each throw/catch pair
+            for i in range(len(throw_inds)):
+                throw = throw_inds[i]
+                catch = catch_inds[i]
+                #Get ball coordinates
+                ball = ast.literal_eval(throws.loc[catch,'ball_coords'])
+                #Sometimes ball coordinates are empty at time of catch, this is to go back one row if thats the case to try and fix it
+                if ball == []:
+                    ball = ast.literal_eval(throws.loc[catch - 1,'ball_coords'])
+               
+                #Get x and y of all players
+                players = ast.literal_eval(throws.loc[throw,'player_ids'])
+                playerx = ast.literal_eval(throws.loc[throw,'player_x'])
+                playery = ast.literal_eval(throws.loc[throw,'player_y'])
+                
+                #If the ball was acquired by the first baseman, add it to dataframe
+                if '3' in throws.loc[catch, 'player_position']:
+                    start = throws.loc[throw,'timestamp_rounded']
+                    end = throws.loc[catch,'timestamp_rounded']
+                    inds = throws.index[(throws['timestamp_rounded'] <= end) & (throws['timestamp_rounded'] >= start) & (throws['play_id'] == play) & (throws['game_str'] == g)].tolist()
+                    throws.loc[inds,'throw_id'] = j
+                    j += 1
+                    throws_final += [throws.loc[inds]]
+                
+                #Otherwise, if the 1st baseman is closer to the base at the time of the throw than the person who acquires the ball (ball may have been meant for first baseman)
+                elif int(throws.loc[catch, 'player_position'][1]) in players and 3 in players and ball != []:
+                    catcherloc = players.index(int(throws.loc[catch, 'player_position'][1]))
+                    firstloc = players.index(3)
+                    #Also check that ball wasn't caught in the vicinity of home, otherwise it might be a probem when we check if ball passed within tne feet of 1st
+                    if ((62.76 - playerx[firstloc])**2 + (63.63 - playery[firstloc])**2)**0.5 < ((62.76 - playerx[catcherloc])**2 + (63.63 - playery[catcherloc])**2)**0.5 and ((basex - ball[0])**2 + (basey - ball[1])**2)**0.5 > maxdist:
+                        start = throws.loc[throw, 'timestamp_rounded']
+                        end = throws.loc[catch, 'timestamp_rounded']
+                        inds = throws.index[
+                            (throws['timestamp_rounded'] <= end) & (throws['timestamp_rounded'] >= start) & (throws['play_id'] == play) & (
+                                    throws['game_str'] == g)].tolist()
+                        throws.loc[inds, 'throw_id'] = j
+                        j += 1
+                        throws_final += [throws.loc[inds]]
+
+        #Ball isn't acquired on last throw
+        elif len(throw_inds) > len(catch_inds):
+            #For each time the ball is acquired, do the same thing as above
+            for i in range(len(catch_inds)):
+                throw = throw_inds[i]
+                catch = catch_inds[i]
+                ball = ast.literal_eval(throws.loc[catch, 'ball_coords'])
+                if ball == []:
+                    ball = ast.literal_eval(throws.loc[catch - 1,'ball_coords'])
+                players = ast.literal_eval(throws.loc[throw, 'player_ids'])
+                playerx = ast.literal_eval(throws.loc[throw, 'player_x'])
+                playery = ast.literal_eval(throws.loc[throw, 'player_y'])
+                
+                if '3' in throws.loc[
+                    catch, 'player_position']:
+                    start = throws.loc[throw, 'timestamp_rounded']
+                    end = throws.loc[catch, 'timestamp_rounded']
+                    inds = throws.index[
+                        (throws['timestamp_rounded'] <= end) & (throws['timestamp_rounded'] >= start) & (throws['play_id'] == play) & (
+                                    throws['game_str'] == g)].tolist()
+                    throws.loc[inds, 'throw_id'] = j
+                    j += 1
+                    throws_final += [throws.loc[inds]]
+
+                elif int(throws.loc[catch, 'player_position'][1]) in players and 3 in players and ball != []:
+                    catcherloc = players.index(int(throws.loc[catch, 'player_position'][1]))
+                    firstloc = players.index(3)
+                    if ((62.76 - playerx[firstloc]) ** 2 + (63.63 - playery[firstloc]) ** 2) ** 0.5 < (
+                            (62.76 - playerx[catcherloc]) ** 2 + (63.63 - playery[catcherloc]) ** 2) ** 0.5 and (
+                            (basex - ball[0]) ** 2 + (basey - ball[1]) ** 2) ** 0.5 > maxdist:
+                        start = throws.loc[throw, 'timestamp_rounded']
+                        end = throws.loc[catch, 'timestamp_rounded']
+                        inds = throws.index[
+                            (throws['timestamp_rounded'] <= end) & (throws['timestamp_rounded'] >= start) & (
+                                        throws['play_id'] == play) & (
+                                    throws['game_str'] == g)].tolist()
+                        throws.loc[inds, 'throw_id'] = j
+                        j += 1
+                        throws_final += [throws.loc[inds]]
+
+            #For last throw, check that the ball is further away from home than the cutoff at the end of the play
+            throw = throw_inds[len(throw_inds)-1]
+            start = throws.loc[throw, 'timestamp_rounded']
+            end = throws.index[(throws['play_id'] == play) & (throws['game_str'] == g) & (throws['events'] == '[5]') & (throws['timestamp_rounded'] >= start)].tolist()
+            if len(end) != 0:
+                ballind = throws.index[(throws['play_id'] == play) & (throws['game_str'] == g) & (throws['ball_coords'] != '[]')].tolist()[-1]
+                ball = ast.literal_eval(throws.loc[ballind, 'ball_coords'])
+                if ball != []:
+                    if ((basex - ball[0])**2 + (basey - ball[1])**2)**0.5 > maxdist:
+                        end = throws.loc[end[0], 'timestamp_rounded']
+                        inds = throws.index[
+                            (throws['timestamp_rounded'] <= end) & (throws['timestamp_rounded'] >= start) & (throws['play_id'] == play) & (
+                                        throws['game_str'] == g)].tolist()
+                        throws.loc[inds, 'throw_id'] = j
+                        j += 1
+                        throws_final += [throws.loc[inds]]
+
+#Create dataframe out of list of throws
+throws_final = pd.concat(throws_final)
+
+#Change dataframe name as to not break everything, as this was originally done in multiple files
+throws = throws_final.reset_index(drop = True)
+#add columns to dataframe
+throws['ball_x'] = ''
+throws['ball_y'] = ''
+throws['ball_z'] = ''
+throws['ball_dist'] = ''
+throws['is_closer'] = ''
+throws_final = []
+
+#Get number of throws being considered
+print(len(np.unique(throws['throw_id'])))
+
+```
+
+```{python}
+#For each throw being considered
+for id in np.unique(throws['throw_id']):
+    #Get indices of the matching throw
+    inds = throws.index[throws['throw_id'] == id].tolist()
+    for i in range(len(inds)):
+        
+        #Add ballx y and z back as columns
+        ind = inds[i]
+        ball = ast.literal_eval(throws.loc[ind,'ball_coords'])
+        if ball != []:
+            throws.loc[ind,'ball_x'] = ball[0]
+            throws.loc[ind,'ball_y'] = ball[1]
+            throws.loc[ind,'ball_z'] = ball[2]
+            throws.loc[ind,'ball_dist'] = ((62.76 - ball[0])**2 + (63.63 - ball[1])**2)**0.5
+        
+        else:
+            #Set distance as 1000 if ball position is not known
+            throws.loc[ind, 'ball_dist'] = 1000
+        
+        #Check if ball is getting closer radially
+        if i != 0:
+            throws.loc[ind,'is_closer'] = throws.loc[ind,'ball_dist'] <= throws.loc[inds[i-1],'ball_dist']
+
+    temp = throws.loc[inds]
+    #If ball passes within ten feet of first, consider it a throw to first
+    if min(temp['ball_dist']) < 10:
+        throws_final += [temp]
+
+#Create dataframe of throws to first
+throws_final = pd.concat(throws_final)
+#Get number of throws to first
+print(len(np.unique(throws_final['throw_id'])))
+
+```
+
+# Determine Scale Factors for the Ellipsoid and "Onion"
+
+```{python}
+
+#This function checks how big an ellipsoid needs to be to contain the balls trajectory inside it.
+def in_ellipsoid(x,y,ball_x,ball_y,ball_z):
+    #Center ball at first base
+    x, ball_x = x- 62.76, ball_x - 62.76
+    y, ball_y = y- 63.63, ball_y - 63.63
+    
+    #Get current angle of throw relative to the coordinates (1,0)
+    theta = np.arctan2(y,x)
+    
+    #Rotation matrix isn't actually needed for an ellipse but I did this so I'd have it for other shapes if need be, and so that x and y would be oriented towards thrower for intercept values
+    rotation = np.zeros((2,2))
+    rotation[0][0] = np.cos(theta)
+    rotation[0][1] = -1*np.sin(theta)
+    rotation[1][0] = np.sin(theta)
+    rotation[1][1] = np.cos(theta)
+    
+    #Get ball x y and z coordinates during duration of throw
+    ball_z = ball_z.reset_index()
+    ball_x = ball_x.reset_index()
+    ball_y = ball_y.reset_index()
+    ball_z.drop(ball_z.columns[0], axis=1, inplace=True)
+    ball_x.drop(ball_x.columns[0], axis=1, inplace=True)
+    ball_y.drop(ball_y.columns[0], axis=1, inplace=True)
+    xprime = []
+    yprime = []
+
+    #Rotate via rotation matrix (unnecessary)
+    for i in range(len(ball_x)):
+        coords = np.dot(rotation,[ball_x.loc[i],ball_y.loc[i]])
+        ball_x.loc[i] = coords[0][0]
+        ball_y.loc[i] = coords[1][0]
+
+    #Initialize alpha
+    alpha = 0.9
+    for i in range(0,125,1):
+        i /= 10
+        #Increase alpha by 0.1 every time
+        alpha = alpha + 0.1
+        #Set beta equal to alpha
+        beta = alpha
+        #If beta is greta than the cutoff for height, set it at the cutoff for height
+        if alpha >= 12.5 / 1.33:
+            beta = 12.5 / 1.33
+        #Calculate "ellipsoidal distance" from (0,0,4) using alpha and beta parameters
+        dist = (((ball_x['ball_x']/alpha)**2) + ((ball_y['ball_y']/alpha)**2)).add(((ball_z['ball_z'] - 4)/(1.33*beta))**2)
+        #Iterate through distances
+        for k in range(len(dist)):
+            if not np.isnan(dist.loc[k]):
+                #If distance is less than one (ellipsoid formula), return values needed
+                if dist.loc[k] <= 1:
+                    return alpha, ball_x.loc[k,'ball_x'], ball_y.loc[k,'ball_y'], ball_z.loc[k,'ball_z']
+    #Return -1 if its out of the range of the ellipsoid.
+    return -1
+
+def in_onion(x,y,ball_x,ball_y,ball_z):
+    # Center ball at first base
+    x, ball_x = x - 62.76, ball_x - 62.76
+    y, ball_y = y - 63.63, ball_y - 63.63
+    
+    # Get angle of play relative to positive side of x axis
+    theta = np.arctan2(y, x)
+    
+    #Create rotation matrix
+    rotation = np.zeros((2, 2))
+    rotation[0][0] = np.cos(theta)
+    rotation[0][1] = -1 * np.sin(theta)
+    rotation[1][0] = np.sin(theta)
+    rotation[1][1] = np.cos(theta)
+    
+    #Get ball x and y and z
+    ball_z = ball_z.reset_index()
+    ball_x = ball_x.reset_index()
+    ball_y = ball_y.reset_index()
+    ball_z.drop(ball_z.columns[0], axis=1, inplace=True)
+    ball_x.drop(ball_x.columns[0], axis=1, inplace=True)
+    ball_y.drop(ball_y.columns[0], axis=1, inplace=True)
+    xprime = []
+    yprime = []
+    
+    #Rotate all coordinates via matrix
+    for i in range(len(ball_x)):
+        # print(i)
+        coords = np.dot(rotation, [ball_x.loc[i], ball_y.loc[i]])
+        # print(coords)
+        ball_x.loc[i] = coords[0][0]
+        ball_y.loc[i] = coords[1][0]
+    
+    #Set alpha and kappa
+    alpha = 0.9
+    kappa = alpha
+    for i in range(0, 125, 1):
+        i /= 10
+        #Kappa is width of onion (which will be returned)
+        alpha = kappa
+        alpha = alpha + 0.1
+        kappa = alpha
+        #Alpha = kappa/3 is the size parameter for the part sof the onion
+        alpha /= 3
+        #Beta is the height parameter. Caps out at 12.5/4
+        beta = alpha
+        if alpha >= 12.5/4:
+            beta = 12.5/4
+        for k in range(len(ball_x['ball_x'])):
+            #Get x and y and z coordinates
+            x = ball_x.loc[k,'ball_x']
+            y = ball_y.loc[k,'ball_y']
+            z = ball_z.loc[k,'ball_z']
+            #Check if ball coodinates fall in any section of the onion
+            if abs(x) <= alpha and abs(y) <= alpha and (z - 4) <= 4*beta:
+
+                return kappa, x, y, z
+            elif ((((x)/(alpha))**2) + (((y - alpha)/(2*alpha))**2)) + ((z - 4)/(4*beta))**2 <= 1 and y >= alpha:
+
+                return kappa, x, y, z
+            elif ((((x)/(alpha))**2) + (((y + alpha)/(2*alpha))**2)) + ((z - 4)/(4*beta))**2 <= 1 and y <= -1*alpha:
+
+                return kappa, x, y, z
+            elif ((((x - alpha)/(2*alpha))**2) + ((y/(alpha))**2)) + ((z - 4)/(4*beta))**2 <= 1 and x >= alpha:
+
+                return kappa, x, y, z
+    #Return section of negative ones if no intersection with onion
+    return -1, -1, -1, -1,
+throws = throws_final.reset_index(drop = True)
+
+throws["Onion"] = ''
+throws["Onionx"] = ''
+throws["Oniony"] = ''
+throws["Onionz"] = ''
+throws["Ellipsoid"] = ''
+throws["Ellipsoidx"] = ''
+throws["Ellipsoidy"] = ''
+throws["Ellipsoidz"] = ''
+
+#Group by game string
+games_temp = throws.groupby('game_str').groups
+games = []
+for group in games_temp:
+    games += [throws.loc[games_temp[group],:]]
+
+#For each game
+for game in games:
+    game_temp = game.reset_index()
+    g = game_temp['game_str'][0]
+    
+    #For each play
+    for play in np.unique(game['play_id']):
+        throw_inds = throws.index[(throws['play_id'] == play) & (throws['game_str'] == g)].tolist()
+        #Get player x and y
+        players_x = ast.literal_eval(throws.loc[throw_inds[0],'player_x'])
+        players_y = ast.literal_eval(throws.loc[throw_inds[0],'player_y'])
+        #Get player ids
+        ids = ast.literal_eval(throws.loc[throw_inds[0],'player_ids'])
+        #Find player who through the ball
+        player = ast.literal_eval(throws.loc[throw_inds[0],'player_position'])[0]
+       
+        #Get ball x and y and z coordinates
+        ball_x = throws.loc[throw_inds,'ball_x']
+        ball_y = throws.loc[throw_inds,'ball_y']
+        ball_z = throws.loc[throw_inds,'ball_z']
+        ball_x = ball_x.apply(lambda col:pd.to_numeric(col, errors='coerce'))
+        ball_y = ball_y.apply(lambda col:pd.to_numeric(col, errors='coerce'))
+        ball_z = ball_z.apply(lambda col:pd.to_numeric(col, errors='coerce'))
+        
+        #Get x and y of where throw originated
+        x = players_x[ids.index(player)]
+        y = players_y[ids.index(player)]
+        
+        #Get ellipsoid and onion values from functions
+        throws.loc[throw_inds,'Ellipsoid'],throws.loc[throw_inds,'Ellipsoidx'],throws.loc[throw_inds,'Ellipsoidy'],throws.loc[throw_inds,'Ellipsoidz'] = in_ellipsoid(x,y,ball_x,ball_y,ball_z)
+        throws.loc[throw_inds,'Onion'],throws.loc[throw_inds,'Onionx'],throws.loc[throw_inds,'Oniony'],throws.loc[throw_inds,'Onionz'] = in_onion(x,y,ball_x,ball_y,ball_z)
+#Yay
+print("yay")
+
+#Save in excel sheet
+throws['timestamp'] = throws['timestamp'].apply(lambda col:pd.to_numeric(col, errors='coerce'))
+throws['timestamp_rounded'] = throws['timestamp_rounded'].apply(lambda col:pd.to_numeric(col, errors='coerce'))
+throws['play_id'] = throws['play_id'].apply(lambda col:pd.to_numeric(col, errors='coerce'))
+
+writer = 'throws_to_first' + '.xlsx'
+throws.to_excel(writer)
+
+```
+
+# Data Manipulation
+
+After throws to first base were isolated, extensive data cleaning was performed
+to fill in missing information in `game_info`.
+
+Load libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(here)
+library(writexl)
+library(readxl)
+```
+
+Load the individual game_info and ball_pos game_events files into two full dataframes.
+```{r}
+data_folder <- here("Provided Data", "smt_data_challenge_2023")
+game_info_folder <- here(data_folder, "game_info")
+game_info <- list.files(here(game_info_folder), full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+ball_info_folder <- here(data_folder, "ball_pos")
+ball_pos <- list.files(here(ball_info_folder), full.names = T) %>%
+  lapply(read_csv, show_col_types = FALSE, col_select = -1) %>%
+  bind_rows()
+```
+
+Load the dataframe that has the identified throws to first.
+```{r}
+throws_to_first <- read_xlsx("throws_to_first.xlsx")
+# Fix timestamp values to not be of type character
+throws_to_first$timestamp <- as.numeric(throws_to_first$timestamp)
+```
+
+We need to know the player at first base for each throw and this is in game_info. There are missing plays in game_info though. This identifies which plays in throws_to_first are not currently present in game_info.
+```{r}
+missing_plays <- data.frame(game_str = character(),
+                            missing_play = integer())
+unique_games <- unique(throws_to_first$game_str)
+for (game in unique_games) {
+  throws_to_first_plays <- unique(throws_to_first$play_id[throws_to_first$game_str == game])
+  game_info_plays <- unique(game_info$play_per_game[game_info$game_str == game])
+  missing_play <- setdiff(throws_to_first_plays, game_info_plays) # Find which plays are in throws_to_first but not in game_info
+  missing_plays <- rbind(missing_plays,
+                         data.frame(game_str = rep(game, length(missing_play)),
+                                    missing_play = missing_play))
+  }
+```
+
+The function insert_row adds the desired row of information based on the game_str, the missing play_per_game, and the play_per_game it will be assumed to most resemble.
+```{r}
+insert_row <- function(df, game_str, play_per_game, play_per_game_to_copy) {
+  insert_index <- which(df$game_str == game_str & df$play_per_game == play_per_game_to_copy)
+  new_row <- df[insert_index, ]
+  new_row$play_per_game <- play_per_game
+  new_df <- rbind(df[1:insert_index, ], new_row, df[(insert_index + 1):nrow(df), ])
+  return(new_df)
+}
+```
+
+There are 107 plays in throws_to_first that are not in game_info. Now they are manually added in to get which first baseman is involved in the play.
+```{r}
+game_info_updated <- game_info
+game_info_updated <- insert_row(game_info_updated, "1900_01_TeamKJ_TeamB", 48, 47) # 47top, 49top
+game_info_updated <- insert_row(game_info_updated, "1900_02_TeamKJ_TeamB", 71, 69) # 69bot, 73bot
+game_info_updated <- insert_row(game_info_updated, "1900_02_TeamKJ_TeamB", 179, 176) # 176top, 180top
+game_info_updated <- insert_row(game_info_updated, "1900_02_TeamKJ_TeamB", 282, 281) # 281top, 283top
+game_info_updated <- insert_row(game_info_updated, "1900_03_TeamKJ_TeamB", 138, 137) # 137bot, 139top. 123604ms longer delta_t btwn 138-139 vs 137-138 suggests 138bot
+game_info_updated <- insert_row(game_info_updated, "1900_03_TeamKJ_TeamB", 165, 164) # 164bot, 167bot
+game_info_updated <- insert_row(game_info_updated, "1900_04_TeamKK_TeamB", 220, 219) # 219top, 221top
+game_info_updated <- insert_row(game_info_updated, "1900_05_TeamKK_TeamB", 9, 6) # 6top, 11top
+game_info_updated <- insert_row(game_info_updated, "1900_05_TeamKK_TeamB", 44, 43) # 43top, 47top
+game_info_updated <- insert_row(game_info_updated, "1900_06_TeamKL_TeamB", 146, 145) # 145top, 147top
+game_info_updated <- insert_row(game_info_updated, "1900_08_TeamKL_TeamB", 207, 206) # 206top, 209top
+game_info_updated <- insert_row(game_info_updated, "1900_09_TeamKK_TeamB", 170, 169) # 169top, 176bot. Delta_t is longest btwn 175-176 so 170top
+game_info_updated <- insert_row(game_info_updated, "1901_01_TeamLG_TeamA3", 21, 18) # 18top, 23top
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 76, 69) # 69bot, 99bot
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 78, 69) # 69bot, 99bot
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 85, 69) # 69bot, 99bot
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 96, 69) # 69bot, 99bot
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 98, 69) # 69bot, 99bot
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 150, 147) # 147bot, 153bot
+game_info_updated <- insert_row(game_info_updated, "1901_02_TeamLG_TeamA3", 269, 268) # 268bot, 270bot
+game_info_updated <- insert_row(game_info_updated, "1901_03_TeamLG_TeamA3", 3, 11) # 11top1
+game_info_updated <- insert_row(game_info_updated, "1901_03_TeamLG_TeamA3", 8, 11) # 11top1
+game_info_updated <- insert_row(game_info_updated, "1901_03_TeamLG_TeamA3", 21, 20) # 20top, 22top
+game_info_updated <- insert_row(game_info_updated, "1901_03_TeamLG_TeamA3", 214, 213) # 213bot, 221bot
+game_info_updated <- insert_row(game_info_updated, "1901_04_TeamLI_TeamA3", 237, 236) # 236bot, 238top. 237bot because has same runner situation as 236
+game_info_updated <- insert_row(game_info_updated, "1901_07_TeamLK_TeamB", 154, 153) # 153top, 155top
+game_info_updated <- insert_row(game_info_updated, "1901_07_TeamLK_TeamB", 188, 187) # 187top, 189top
+game_info_updated <- insert_row(game_info_updated, "1901_07_TeamLK_TeamB", 192, 191) # 191top, 193top
+game_info_updated <- insert_row(game_info_updated, "1901_10_TeamLJ_TeamB", 148, 147) # 147bot, 149bot
+game_info_updated <- insert_row(game_info_updated, "1901_10_TeamLJ_TeamB", 181, 178) # 178bot, 182bot
+game_info_updated <- insert_row(game_info_updated, "1901_10_TeamLJ_TeamB", 244, 242) # 242bot, 245bot
+game_info_updated <- insert_row(game_info_updated, "1901_11_TeamLJ_TeamB", 139, 137) # 137bot, 143top. 139bot because it's third out since 139 had r1, r2 and 140 has no runners on
+game_info_updated <- insert_row(game_info_updated, "1901_11_TeamLJ_TeamB", 146, 145) # 145top, 148top
+game_info_updated <- insert_row(game_info_updated, "1901_14_TeamLL_TeamB", 164, 163) # 163top, 165top
+game_info_updated <- insert_row(game_info_updated, "1901_16_TeamLH_TeamA3", 188, 187) # 187top, 189top
+game_info_updated <- insert_row(game_info_updated, "1901_16_TeamLH_TeamA3", 211, 210) # 210top, 213top
+game_info_updated <- insert_row(game_info_updated, "1902_04_TeamML_TeamB", 43, 42) # 42bot, 44bot
+game_info_updated <- insert_row(game_info_updated, "1902_04_TeamML_TeamB", 53, 46) # 46bot, 54top. 95400ms longer delta_t btwn 53-54 than 48-49 suggests 53bot
+game_info_updated <- insert_row(game_info_updated, "1902_04_TeamML_TeamB", 80, 79) # 79bot, 81bot
+game_info_updated <- insert_row(game_info_updated, "1902_05_TeamML_TeamB", 27, 26) # 26bot, 28bot
+game_info_updated <- insert_row(game_info_updated, "1902_05_TeamML_TeamB", 60, 58) # 58top, 61top
+game_info_updated <- insert_row(game_info_updated, "1902_05_TeamML_TeamB", 165, 163) # 163top, 166top
+game_info_updated <- insert_row(game_info_updated, "1902_05_TeamML_TeamB", 9, 8) # 8top, 10top
+game_info_updated <- insert_row(game_info_updated, "1902_05_TeamML_TeamB", 240, 239) # 239bottom, 254top. 240bot because 239 is pickoff at first just like 240 so inning change couldn't have occurred
+game_info_updated <- insert_row(game_info_updated, "1902_07_TeamMJ_TeamB", 25, 24) # 24bot, 26bot
+game_info_updated <- insert_row(game_info_updated, "1902_07_TeamMJ_TeamB", 101, 100) # 100top, 102top
+game_info_updated <- insert_row(game_info_updated, "1902_08_TeamMJ_TeamB", 70, 69) # 69bot, 71bot
+game_info_updated <- insert_row(game_info_updated, "1902_08_TeamMJ_TeamB", 79, 78) # 78top, 80top
+game_info_updated <- insert_row(game_info_updated, "1902_08_TeamMJ_TeamB", 101, 100) # 100bot, 102bot
+game_info_updated <- insert_row(game_info_updated, "1902_08_TeamMJ_TeamB", 132, 131) # 131bot, 133bot
+game_info_updated <- insert_row(game_info_updated, "1902_09_TeamMJ_TeamB", 40, 39) # 39top, 41top
+game_info_updated <- insert_row(game_info_updated, "1902_09_TeamMJ_TeamB", 189, 188) # 188bot, 190bot
+game_info_updated <- insert_row(game_info_updated, "1902_09_TeamMJ_TeamB", 199, 198) # 198bot, 200bot
+game_info_updated <- insert_row(game_info_updated, "1902_09_TeamMJ_TeamB", 293, 292) # 292top, 294top
+game_info_updated <- insert_row(game_info_updated, "1902_09_TeamMJ_TeamB", 295, 294) # 294top, 296top
+game_info_updated <- insert_row(game_info_updated, "1902_10_TeamMI_TeamA3", 145, 144) # 144bot, 146bot
+game_info_updated <- insert_row(game_info_updated, "1902_10_TeamMI_TeamA3", 282, 279) # 279bot9
+game_info_updated <- insert_row(game_info_updated, "1902_12_TeamMI_TeamA3", 47, 46) # 46bot, 48bot
+game_info_updated <- insert_row(game_info_updated, "1902_12_TeamMI_TeamA3", 58, 57) # 57bot, 59bot
+game_info_updated <- insert_row(game_info_updated, "1902_12_TeamMI_TeamA3", 60, 59) # 59bot, 61bot
+game_info_updated <- insert_row(game_info_updated, "1902_12_TeamMI_TeamA3", 70, 69) # 69top, 71top
+game_info_updated <- insert_row(game_info_updated, "1902_13_TeamMD_TeamA2", 79, 78) # 78bot, 80bot
+game_info_updated <- insert_row(game_info_updated, "1902_13_TeamMD_TeamA2", 88, 86) # 86top, 89top
+game_info_updated <- insert_row(game_info_updated, "1902_13_TeamMK_TeamB", 6, 5) # 5top, 7top
+game_info_updated <- insert_row(game_info_updated, "1902_13_TeamMK_TeamB", 43, 42) # 42top, 45bot. 114650ms longer delta_t btwn 43-44 vs 42-43 suggests 43top
+game_info_updated <- insert_row(game_info_updated, "1902_13_TeamMK_TeamB", 130, 129) # 129top, 132bot. 93250ms longer delta_t btwn 130-131 vs 129-130 suggests 130top
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMD_TeamA2", 66, 67) # 57top, 67bot. 89050ms longer delta_t btwn 65-66 vs 58-59 suggests 66bot
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMD_TeamA2", 314, 312) # 312top, 315top
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMK_TeamB", 50, 49) # 49bot, 51bot
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMK_TeamB", 53, 52) # 52bot, 54bot
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMK_TeamB", 55, 54) # 54bot, 56bot
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMK_TeamB", 59, 58) # 58bot, 60bot
+game_info_updated <- insert_row(game_info_updated, "1902_14_TeamMK_TeamB", 298, 297) # 297top9
+game_info_updated <- insert_row(game_info_updated, "1902_15_TeamMK_TeamB", 52, 51) # 51top, 53top
+game_info_updated <- insert_row(game_info_updated, "1902_16_TeamMD_TeamA2", 77, 74) # 74top, 78top
+game_info_updated <- insert_row(game_info_updated, "1902_17_TeamMB_TeamA1", 192, 191) # 191bot, 193bot
+game_info_updated <- insert_row(game_info_updated, "1902_17_TeamMB_TeamA1", 208, 205) # 205top, 209top
+game_info_updated <- insert_row(game_info_updated, "1902_18_TeamMB_TeamA1", 145, 144) # 144bot, 146bot
+game_info_updated <- insert_row(game_info_updated, "1902_20_TeamME_TeamA2", 23, 22) # 22bot, 24bot
+game_info_updated <- insert_row(game_info_updated, "1902_20_TeamME_TeamA2", 193, 178) # 178bot, 197bot
+game_info_updated <- insert_row(game_info_updated, "1902_20_TeamME_TeamA2", 273, 270) # 270bot, 294top. Low maximum delta_t of 33200ms btwn plays from 270-273 suggests 273bot
+game_info_updated <- insert_row(game_info_updated, "1902_20_TeamME_TeamA2", 274, 270) # 270bot, 294top. Pickoff attempt with runner on first so no inning switch could have occurred
+game_info_updated <- insert_row(game_info_updated, "1902_20_TeamME_TeamA2", 275, 270) # 270bot, 294top. Pickoff attempt with runner on first so no inning switch could have occurred
+game_info_updated <- insert_row(game_info_updated, "1902_20_TeamME_TeamA2", 293, 294) # 270bot, 294top. 19000ms delta_t btwn 293-294 suggests inning change already occurred so 293top
+game_info_updated <- insert_row(game_info_updated, "1902_21_TeamME_TeamA2", 7, 6) # 6top, 8top
+game_info_updated <- insert_row(game_info_updated, "1902_21_TeamME_TeamA2", 10, 9) # 9top, 11top
+game_info_updated <- insert_row(game_info_updated, "1902_21_TeamME_TeamA2", 25, 24) # 24bot, 32top. 32950ms delta_t btwn 24-25 suggests inning change happens after so 25bot
+game_info_updated <- insert_row(game_info_updated, "1902_21_TeamME_TeamA2", 76, 75) # 75bot, 89top. 98200ms longer delta_t btwn 82-83 vs 78-79 suggests 76bot
+game_info_updated <- insert_row(game_info_updated, "1902_21_TeamME_TeamA2", 79, 75) # 75bot, 89top. 98200ms longer delta_t btwn 82-83 vs 78-79 suggests 79bot
+game_info_updated <- insert_row(game_info_updated, "1902_21_TeamME_TeamA2", 86, 89) # 75bot, 89top. 98200ms longer delta_t btwn 82-83 vs 78-79 suggests 86top
+game_info_updated <- insert_row(game_info_updated, "1902_24_TeamMA_TeamA1", 227, 226) # 226top, 228top
+game_info_updated <- insert_row(game_info_updated, "1902_25_TeamMH_TeamA3", 139, 138) # 138bot, 140bot
+game_info_updated <- insert_row(game_info_updated, "1902_26_TeamMC_TeamA1", 8, 6) # 6top, 18top
+game_info_updated <- insert_row(game_info_updated, "1902_26_TeamMC_TeamA1", 254, 253) # 253bot, 255bot
+game_info_updated <- insert_row(game_info_updated, "1902_26_TeamMH_TeamA3", 56, 55) # 55top, 57top
+game_info_updated <- insert_row(game_info_updated, "1902_26_TeamMH_TeamA3", 111, 6) # 110bot, 112bot
+game_info_updated <- insert_row(game_info_updated, "1902_26_TeamMH_TeamA3", 279, 278) # 278bot, 280bot
+game_info_updated <- insert_row(game_info_updated, "1902_29_TeamMF_TeamA2", 92, 86) # 86bot, 99top. 103250ms longer delta_t btwn 97-98 vs 95-96 suggests 92bot
+game_info_updated <- insert_row(game_info_updated, "1902_29_TeamMF_TeamA2", 95, 86) # 86bot, 99top. 103250ms longer delta_t btwn 97-98 vs 95-96 suggests 95bot
+game_info_updated <- insert_row(game_info_updated, "1902_29_TeamMF_TeamA2", 97, 86) # 86bot, 99top. 103250ms longer delta_t btwn 97-98 vs 95-96 suggests 97bot
+game_info_updated <- insert_row(game_info_updated, "1902_29_TeamMF_TeamA2", 132, 131) # 131bot, 133bot
+game_info_updated <- insert_row(game_info_updated, "1902_30_TeamMF_TeamA2", 155, 153) # 153bot, 158bot
+game_info_updated <- insert_row(game_info_updated, "1902_31_TeamMF_TeamA2", 75, 73) # 73top, 85bot. 94900ms longer delta_t btwn 84-85 vs 77-78 suggests 75top
+game_info_updated <- insert_row(game_info_updated, "1903_02_TeamNE_TeamA2", 39, 38) # 38top, 40top
+game_info_updated <- insert_row(game_info_updated, "1903_07_TeamND_TeamA2", 166, 165) # 165top, 167top
+game_info_updated <- insert_row(game_info_updated, "1903_17_TeamNI_TeamA3", 98, 110) # 96bot, 99top. 98top because 96 had runner on 2nd that didn't get thrown out on the play and 97 is pitch with no one on (so 96 was third out). Chose play 110 because play 99 has a glitch that has it as two rows, one in bottom and one in top. 110 is the next time it is in the top without a glitched double row.
+game_info_updated <- insert_row(game_info_updated, "1903_25_TeamNH_TeamA3", 262, 261) # 261top, 263top
+```
+
+These are the 6 plays that have been removed.
+```{r}
+throws_to_first <- throws_to_first[
+  !(throws_to_first$game_str == "1902_17_TeamMB_TeamA1" & throws_to_first$play_id == 155) # Pitcher covers first 
+  & !(throws_to_first$game_str == "1903_09_TeamNJ_TeamB" & (throws_to_first$play_id == 156 # Second baseman covers first
+  | throws_to_first$play_id == 215))  # Second baseman covers first
+  & !(throws_to_first$game_str == "1902_18_TeamMB_TeamA1" & throws_to_first$play_id == 31) # First base cutoff
+  & !(throws_to_first$game_str == "1903_19_TeamNL_TeamB" & throws_to_first$play_id == 304) # First base cutoff
+  & !(throws_to_first$game_str == "1903_24_TeamNA_TeamA1" & throws_to_first$play_id == 76), ] # First base back pick from catcher
+```
+
+Feature engineering - This constructs a dataframe with more information about each throw to use for modelling.
+```{r}
+throws_info <- throws_to_first %>%
+  group_by(game_str, play_id) %>%
+  mutate(at_teamA1 = ifelse(grepl("_TeamA1", game_str), 1, 0),
+         at_teamA2 = ifelse(grepl("_TeamA2", game_str), 1, 0),
+         at_teamA3 = ifelse(grepl("_TeamA3", game_str), 1, 0), # This makes a dummy variable for what stadium the throw is in. at_teamB not required because if 0 across A1, A2, A3 then at team B.
+         has_bounce = ifelse(any(events == "[16]" & is_closer & (!(any(events == '[10]')) | row_number() < which(events == '[10]')[1]) & (!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])), 1, 0), # If the ball bounces and is getting closer to first base before it deflects off a wall, glove, or person then it has_bounce.
+         bounce_count = sum(events == "[16]" & is_closer & (!(any(events == '[10]')) | row_number() < which(events == '[10]')[1]) & (!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])), # This counts how many times a throw bounced following the previously explained conditions. Interestingly, no throw had more than one bounce under those conditions.
+         was_caught = ifelse(any(((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]'))  & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1]))), 1, 0), # If the ball was acquired by the first baseman before it deflects off a wall, glove, or person then it was_caught.
+         next_event_index = which(events != '[]')[1],
+         duration = timestamp - timestamp[next_event_index],
+         distance = sqrt((ball_x - ball_x[next_event_index])^2 + (ball_y - ball_y[next_event_index])^2), # This distance is from the throw to the next event which is either an acquisition, bounce, or deflection.
+         velocity = (distance / duration) * (1000 * 3600 / 5280)) %>% # Velocity is converted from ft/ms to mph.
+  filter(events != '[]') %>%
+  mutate(throw_duration = lead(duration),
+         throw_distance = lead(distance),
+         throw_velocity = lead(velocity),
+         next_event = lead(events)) %>%
+  slice_head(n = 1)
+throws_info <- left_join(throws_info, game_info_updated, by = c("game_str", "play_id" = "play_per_game")) %>% # This gets the player who is at first base on the play.
+  distinct(play_id, game_str, events, player_position, first_base, Ellipsoid, Ellipsoidx, Ellipsoidy, Ellipsoidz, has_bounce, bounce_count, was_caught, throw_velocity, throw_distance, throw_duration, at_teamA1, at_teamA2, at_teamA3)
+write_csv(throws_info, "throws_info.csv")
+```
+
+After completing data manipulation, attention was turned towards modelling Expected Catch Rate.
+
+# Modelling
+
+Load libraries
+```{r}
+library(tidyverse)
+library(readxl)
+library(readr)
+library(caTools) # For sample.split function
+library(pROC) # For roc/auc functions
+library(e1071) # For naive bayes model
+library(randomForest) # For random forest model
+library(xgboost) # For xgboost model
+library(writexl)
+```
+
+Load dataframe with information of every throw.
+```{r}
+throws_info <- read_csv('throws_info.csv')
+```
+
+Check the importance of variables in throws_info to determine which are valuable to include in the first base catch probability model (xCR).
+```{r}
+set.seed(2003)
+# Split 60% of thorows to training set and 40% of throws to testing set.
+sample <- sample.split(throws_info$was_caught, SplitRatio = 0.6)
+data_train <- subset(throws_info, sample == TRUE)
+data_test <- subset(throws_info, sample == FALSE)
+# See how all these variables affect was_caught
+logistic_model <- glm(was_caught ~ Ellipsoid + Ellipsoidx + Ellipsoidy + Ellipsoidz + has_bounce + throw_velocity + throw_distance + throw_duration + at_teamA1 + at_teamA2 + at_teamA3,
+                      data_train,
+                      family = 'binomial')
+summary(logistic_model)
+# The statistically significant variables (p-value < 0.05) are Ellipsoid, Ellipsoidx, Ellipsoidy, Ellipsoidz, and has_bounce which aligns with intuition for what would affect the probability of a catch.
+```
+
+Select only the variables that will be used in the model based on the above.
+```{r}
+modelling_data <- throws_info %>%
+  select(c(Ellipsoid, Ellipsoidx, Ellipsoidy, Ellipsoidz, has_bounce, was_caught))
+```
+
+Logistic model
+```{r}
+set.seed(2003)
+sample <- sample.split(modelling_data$was_caught, SplitRatio = 0.6)
+data_train <- subset(modelling_data, sample == TRUE)
+data_test <- subset(modelling_data, sample == FALSE)
+# Fitting logistic model to training set
+logistic_model <- glm(was_caught ~ .,
+                      data_train,
+                      family = 'binomial')
+# Predicting on testing set
+logistic_predictions <- predict(logistic_model, data_test, type = 'response')
+# Build a confusion matrix to evaluate model
+logistic_conf_matrix <- table(factor(ifelse(logistic_predictions >= 0.5, 1, 0)), factor(data_test$was_caught))
+logistic_precision <- logistic_conf_matrix[2, 2] / sum(logistic_conf_matrix[, 2])
+logistic_recall <- logistic_conf_matrix[2, 2] / sum(logistic_conf_matrix[2, ])
+logistic_f1_score <- 2 * (logistic_precision * logistic_recall) / (logistic_precision + logistic_recall)
+logistic_roc <- roc(as.numeric(data_test$was_caught), as.numeric(logistic_predictions))
+logistic_auc <- auc(logistic_roc)
+# Precision = 0.9946, recall = 0.9725, f1 score = 0.9834, auc = 0.593
+```
+
+Naive bayes model
+```{r}
+set.seed(54)
+# Fitting naive bayes model to training set
+naive_bayes_model <- naiveBayes(was_caught ~ ., data_train)
+# Predicting on testing set
+bayes_predictions <- predict(naive_bayes_model, data_test, type = 'class')
+bayes_conf_matrix <- table(bayes_predictions, data_test$was_caught)
+# Build a confusion matrix to evaluate model
+bayes_precision <- bayes_conf_matrix[2, 2] / sum(bayes_conf_matrix[, 2])
+bayes_recall <- bayes_recall <- bayes_conf_matrix[2, 2] / sum(bayes_conf_matrix[2, ])
+bayes_f1_score <- 2 * (bayes_precision * bayes_recall) / (bayes_precision + bayes_recall)
+bayes_roc <- roc(as.numeric(data_test$was_caught), as.numeric(bayes_predictions))
+bayes_auc <- auc(bayes_roc)
+# Precision = 0.9745, recall = 0.9811, f1 score = 0.9778, auc = 0.669
+```
+
+Random forest model
+```{r}
+set.seed(218)
+# Random forest model requires target variable to be a factor
+rf_modelling_data <- modelling_data %>% 
+  mutate(was_caught = as.factor(was_caught))
+rf_data_train <- rf_modelling_data[sample,]
+rf_data_test <- rf_modelling_data[!sample,]
+# Fitting random forest model to training set
+random_forest_model <- randomForest(was_caught ~ ., 
+                        data = rf_data_train, 
+                        ntree = 100,
+                        importance = TRUE,
+                        proximity = TRUE)
+# Predicting on testing set
+rf_predictions <- predict(random_forest_model, rf_data_test)
+# Build a confusion matrix to evaluate model
+rf_conf_matrix <- table(rf_predictions, rf_data_test$was_caught)
+rf_precision <- rf_conf_matrix[2, 2] / sum(rf_conf_matrix[, 2])
+rf_recall <- rf_conf_matrix[2, 2] / sum(rf_conf_matrix[2, ])
+rf_f1_score <- 2 * (rf_precision * rf_recall) / (rf_precision + rf_recall)
+rf_roc <- roc(as.numeric(rf_data_test$was_caught), as.numeric(rf_predictions))
+rf_auc <- auc(rf_roc)
+# Precision = 0.9987, recall = 0.9739, f1 score = 0.9861, auc = 0.545
+```
+
+XGBoost model
+```{r}
+set.seed(410)
+# xgboost model requires data in matrix form
+xgboost_matrix <- modelling_data %>%
+  select(!was_caught) %>%
+  as.matrix()
+# Also it requires the label variable separate from the indicator variables
+xgboost_label <- modelling_data$was_caught
+xgboost_matrix_train <- xgboost_matrix[sample,]
+xgboost_matrix_test <- xgboost_matrix[!sample,]
+xgboost_label_train <- xgboost_label[sample]
+xgboost_label_test <- xgboost_label[!sample]
+# Fitting xgboost model to training set
+xgboost_model <- xgboost(data = xgboost_matrix_train, 
+                         label = xgboost_label_train, 
+                         nrounds = 10,
+                         objective = 'binary:logistic')
+# Predicting on testing set
+xgboost_predictions <- predict(xgboost_model, xgboost_matrix_test, type = 'response')
+# Build a confusion matrix to evaluate model
+xgboost_conf_matrix <- table(ifelse(xgboost_predictions >= 0.5, 1, 0), xgboost_label_test)
+xgboost_precision <- xgboost_conf_matrix[2, 2] / sum(xgboost_conf_matrix[, 2])
+xgboost_recall <- xgboost_conf_matrix[2, 2] / sum(xgboost_conf_matrix[2, ])
+xgboost_f1_score <- 2 * (xgboost_precision * xgboost_recall) / (xgboost_precision + xgboost_recall)
+xgboost_roc <- roc(xgboost_label_test, xgboost_predictions)
+xgboost_auc <- auc(xgboost_roc)
+# Precision = 0.9933, recall = 0.975, f1 score = 0.9841, auc = 0.812
+```
+
+Determine CAA rankings by player.
+```{r}
+# Make expected catch rate (xCR) predictions using xgboost model for every throw
+xCR <- predict(xgboost_model, xgboost_matrix, type = 'response')
+throws_info_with_xCR <- cbind(throws_info, xCR) %>%
+  distinct(play_id, game_str, first_base, Ellipsoid, Ellipsoidx, Ellipsoidy, Ellipsoidz, has_bounce, was_caught, xCR)
+write_csv(throws_info_with_xCR, 'throws_info_with_xCR.csv')
+# Create CAA player rankings
+player_rankings <- throws_info_with_xCR %>%
+  group_by(first_base) %>%
+  summarise(CAA = sum(was_caught - xCR)) %>%
+  arrange(desc(CAA))
+write_csv(player_rankings, 'player_rankings.csv')
+```
+
+Create a table with the top 5 and bottom 5 in CAA rankings.
+```{r}
+top5 <- head(player_rankings, 5)
+bottom5 <- tail(player_rankings, 5)
+top5_bottom5 <- rbind(top5, bottom5)
+write_csv(top5_bottom5, 'top5_bottom5.csv')
+```
+
+# Data Visualization
+
+Load libraries
+```{r}
+library(tidyverse)
+library(readxl)
+library(readr)
+library(dplyr)
+library(ggplot2) # For scatterplot
+library(sportyR) # For baseball field
+library(rgl) # For interactive 3D Plot
+```
+
+Load dataframe with throws to first, delete unused plays, and load dataframe with information of every throw, including xCR.
+```{r}
+throws_to_first <- read_xlsx('throws_to_first.xlsx')
+throws_to_first <- throws_to_first[!(throws_to_first$game_str == '1902_17_TeamMB_TeamA1' & throws_to_first$play_id == 155) # Pitcher covers first 
+  & !(throws_to_first$game_str == '1903_09_TeamNJ_TeamB' & (throws_to_first$play_id == 156 # Second baseman covers first
+  | throws_to_first$play_id == 215))  # Second baseman covers first
+  & !(throws_to_first$game_str == '1902_18_TeamMB_TeamA1' & throws_to_first$play_id == 31) # First base cutoff
+  & !(throws_to_first$game_str == '1903_19_TeamNL_TeamB' & throws_to_first$play_id == 304) # First base cutoff
+  & !(throws_to_first$game_str == '1903_24_TeamNA_TeamA1' & throws_to_first$play_id == 76), ] # First base back pick from catcher
+throws_info_with_xcR <- read_csv('throws_info_with_xcR.csv')
+```
+
+2D caught throw locations with xCR colours (spray chart)
+```{r}
+# Definition of a catch as previously defined in Data Manipulation
+caught_throws <- throws_info_with_xcR %>%
+  left_join(throws_to_first, throws_info_with_xcR, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  filter(was_caught == 1 & ((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]')) & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])))
+caught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(caught_throws$ball_x), max(caught_throws$ball_x)), ylims = c(min(caught_throws$ball_y) - 2, max(caught_throws$ball_y) + 5)) +
+  geom_point(data = caught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+                 color = xCR),
+             alpha = 0.5,
+             size = 3) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') + # Colour scale from 0 (red) to 1 (blue)
+  labs(color = 'xCR') +
+  geom_text(aes(x = 62.5, y = 75, label = 'Caught Throws to First Base'), color = 'black', size = 8)
+ggsave('caught_throws_plot.png', caught_throws_plot)
+```
+
+2D uncaught spray chart
+```{r}
+# Find throw's closest location to first base
+uncaught_throws <- throws_info_with_xcR %>%
+  filter(was_caught == 0) %>%
+  left_join(throws_to_first, uncaught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  slice_min(order_by = ball_dist)
+uncaught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(caught_throws$ball_x), max(caught_throws$ball_x)), ylims = c(min(caught_throws$ball_y) - 2, max(caught_throws$ball_y) + 5)) +
+  geom_point(data = uncaught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+             color = xCR),
+             size = 3) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
+  labs(color = 'xCR') +
+  geom_text(aes(x = 62.6, y = 75, label = 'Uncaught Throws to First Base'), color = 'black', size = 8)
+ggsave('uncaught_throws_plot.png', uncaught_throws_plot)
+```
+
+Interactive 3D caught spray chart
+```{r}
+# Generate a colour scale for 3D plot
+myColorRamp <- function(colors, values) {
+    v <- (values - min(values))/diff(range(values))
+    x <- colorRamp(colors)(v)
+    rgb(x[,1], x[,2], x[,3], maxColorValue = 255)
+}
+cols <- myColorRamp(c('red', 'blue'), caught_throws$xCR) 
+plot3d(x = caught_throws$ball_x,
+       y = caught_throws$ball_y,
+       z = caught_throws$ball_z,
+       main = 'Caught Throws to First Base',
+       xlab = 'Ball x position (ft)',
+       ylab = 'Ball y position (ft)',
+       zlab = 'Ball z position (ft)',
+       box = FALSE,
+       type = 's',
+       size = 0.5,
+       col = cols)
+```
+
+Interactive 3D uncaught spray chart
+```{r}
+cols <- myColorRamp(c('red', 'blue'), uncaught_throws$xCR) 
+plot3d(x = uncaught_throws$ball_x,
+       y = uncaught_throws$ball_y,
+       z = uncaught_throws$ball_z,
+       main = 'Uncaught Throws to First Base',
+       xlab = 'Ball x position (ft)',
+       ylab = 'Ball y position (ft)',
+       zlab = 'Ball z position (ft)',
+       box = FALSE,
+       type = 's',
+       size = 0.5,
+       col = cols)
+```
+
+The player with the 11th best CAA's caught/uncaught spray chart
+```{r}
+eleventh_best_CAA_caught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5722) %>%
+  left_join(throws_to_first, eleventh_best_CAA_caught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  filter(was_caught == 1 & ((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]')) & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])))
+eleventh_best_CAA_uncaught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5722 & was_caught == 0) %>%
+  left_join(throws_to_first, eleventh_best_CAA_uncaught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  slice_min(order_by = ball_dist)
+eleventh_best_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(eleventh_best_CAA_caught_throws$ball_x), max(eleventh_best_CAA_caught_throws$ball_x)), ylims = c(min(eleventh_best_CAA_caught_throws$ball_y) - 2, max(eleventh_best_CAA_caught_throws$ball_y) + 3)) +
+  geom_point(data = eleventh_best_CAA_caught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+             color = xCR),
+             size = 3) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
+  labs(color = 'xCR') +
+  geom_text(aes(x = 63, y = 71, label = 'Player 5722: 11th CAA (1.16)'), color = 'black', size = 10)
+ggsave('eleventh_best_CAA_plot.png', eleventh_best_CAA_plot)
+```
+
+The player with the worst CAA's caught/uncaught spray chart
+```{r}
+worst_CAA_caught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5524) %>%
+  left_join(throws_to_first, worst_CAA_caught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  filter(was_caught == 1 & ((events == '[2]' & player_position == '[3]') | (events == '[2, 5]' & player_position == '[3, 0]')) & ((!(any(events == '[10]')) | row_number() < which(events == '[10]')[1])) & ((!(any(events == '[9]')) | row_number() < which(events == '[9]')[1])))
+worst_CAA_uncaught_throws <- throws_info_with_xcR %>%
+  filter(first_base == 5524 & was_caught == 0) %>%
+  left_join(throws_to_first, worst_CAA_uncaught_throws, by = c('game_str', 'play_id')) %>%
+  group_by(game_str, play_id) %>%
+  slice_min(order_by = ball_dist)
+worst_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(eleventh_best_CAA_caught_throws$ball_x), max(eleventh_best_CAA_caught_throws$ball_x)), ylims = c(min(eleventh_best_CAA_caught_throws$ball_y) - 2, max(eleventh_best_CAA_caught_throws$ball_y) + 3)) +
+  geom_point(data = worst_CAA_caught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+             color = xCR),
+             size = 3) +
+  geom_point(data = worst_CAA_uncaught_throws,
+             aes(x = ball_x,
+                 y = ball_y,
+                 color = xCR),
+             size = 10,
+             shape = 18) +
+  scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
+  labs(color = 'xCR') +
+  geom_text(aes(x = 63, y = 71, label = 'Player 5524: Worst CAA (-2.03)'), color = 'black', size = 10)
+ggsave('worst_CAA_plot.png', worst_CAA_plot)
+```
+
+Effect of Ellipsoid on xCR
+```{r}
+ellipsoid_xCR_plot <- ggplot(throws_info_with_xcR, aes(x = Ellipsoid, y = xCR)) +
+  geom_point(color = '#66c2a5') +
+  geom_smooth(method = 'loess', color = '#1f78b4') +
+  labs(title = 'Effect of Ellipsoid Scale Factor on xCR', y = 'xCR', x = 'Ellipsoid Scale Factor') +
+  scale_x_continuous(breaks = seq(0, 10, by = 1)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('ellipsoid_xCR_plot.jpg', ellipsoid_xCR_plot)
+```
+
+Histogram of CAA values
+```{r}
+CAA_hist <- ggplot(player_rankings, aes(x = CAA)) + 
+  geom_histogram(binwidth = 0.1, fill = '#66c2a5', color = '#1f78b4', alpha = 0.8) +
+  labs(title = 'Distribution of CAA', y = 'Number of Players') +
+  scale_x_continuous(breaks = seq(-2, 4, by = 0.5)) +
+  scale_y_continuous(breaks = seq(0, 10, by = 2)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('CAA_hist.png', CAA_hist)
+```
+
+Histogram of OAA Values
+```{r}
+savant_data <- read_csv('outs_above_average.csv')
+OAA_hist <- ggplot(savant_data, aes(x = outs_above_average)) + 
+  geom_histogram(fill = '#66c2a5', color = '#1f78b4', alpha = 0.8) +
+  labs(title = 'Distribution of OAA', y = 'Number of Players', x = 'OAA') +
+  scale_x_continuous(breaks = seq(-80, 120, by = 20)) +
+  scale_y_continuous(breaks = seq(0, 30, by = 5)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave('OAA_hist.png', OAA_hist)
+```
+
+Catches Above Average Distribution
+
+```{python}
+
+import pandas as pd
+import matplotlib.pyplot as plt
+xcr = pd.read_csv('./throws_info_w_xcr.csv')
+xcr['diff'] = xcr['was_caught'] - xcr['xcr']
+xcr['Error'] = xcr['diff'] > -0.7
+caa = xcr.groupby('first_base').agg(count=('diff', 'count'), caa=('diff', 'sum'), fp=('Error', 'mean')).reset_index()
+
+# Create a figure and two subplots side by side
+fig, axs = plt.subplots(1, 2, figsize=(15, 6))  # Adjust the figure size as needed
+
+# Plot the first histogram in the first subplot
+axs[0].hist(caa['caa'], bins=50, color='mediumaquamarine', edgecolor='darkslategray')  # Adjust the number of bins
+axs[0].set_title('Distribution of CAA')
+axs[0].set_xlabel('CAA')
+axs[0].set_ylabel('Number of Players')
+axs[0].grid(True)
+
+# Plot the second histogram in the second subplot
+axs[1].hist(caa['fp'], bins=50, color='mediumaquamarine', edgecolor='darkslategray')  # Adjust the number of bins
+axs[1].set_title('Distribution of Fielding Percentage')
+axs[1].set_xlabel('Fielding Percentage')
+axs[1].set_ylabel('Number of Players')
+axs[1].grid(True)
+
+# Adjust layout to prevent overlap
+plt.tight_layout()
+
+# Show the plots
+plt.show()
+
+```
+
