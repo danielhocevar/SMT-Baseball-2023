@@ -49,7 +49,7 @@ uncaught_throws <- throws_info_with_xcR %>%
   left_join(throws_to_first, uncaught_throws, by = c('game_str', 'play_id')) %>%
   group_by(game_str, play_id) %>%
   slice_min(order_by = ball_dist)
-uncaught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(uncaught_throws$ball_x), max(uncaught_throws$ball_x)), ylims = c(min(uncaught_throws$ball_y) - 2, max(uncaught_throws$ball_y) + 5)) +
+uncaught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(caught_throws$ball_x), max(caught_throws$ball_x)), ylims = c(min(caught_throws$ball_y) - 2, max(caught_throws$ball_y) + 5)) +
   geom_point(data = uncaught_throws,
              aes(x = ball_x,
                  y = ball_y,
@@ -57,7 +57,7 @@ uncaught_throws_plot <- geom_baseball(league = 'milb', display_range = 'infield'
              size = 3) +
   scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
   labs(color = 'xCR') +
-  geom_text(aes(x = 63, y = 75, label = 'Uncaught Throws to First Base'), color = 'black', size = 8)
+  geom_text(aes(x = 62.6, y = 75, label = 'Uncaught Throws to First Base'), color = 'black', size = 8)
 ggsave('uncaught_throws_plot.png', uncaught_throws_plot)
 ```
 
@@ -111,7 +111,7 @@ eleventh_best_CAA_uncaught_throws <- throws_info_with_xcR %>%
   left_join(throws_to_first, eleventh_best_CAA_uncaught_throws, by = c('game_str', 'play_id')) %>%
   group_by(game_str, play_id) %>%
   slice_min(order_by = ball_dist)
-eleventh_best_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(eleventh_best_CAA_caught_throws$ball_x), max(eleventh_best_CAA_caught_throws$ball_x)), ylims = c(min(eleventh_best_CAA_caught_throws$ball_y) - 2, max(eleventh_best_CAA_caught_throws$ball_y) + 5)) +
+eleventh_best_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(eleventh_best_CAA_caught_throws$ball_x), max(eleventh_best_CAA_caught_throws$ball_x)), ylims = c(min(eleventh_best_CAA_caught_throws$ball_y) - 2, max(eleventh_best_CAA_caught_throws$ball_y) + 3)) +
   geom_point(data = eleventh_best_CAA_caught_throws,
              aes(x = ball_x,
                  y = ball_y,
@@ -119,7 +119,7 @@ eleventh_best_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infiel
              size = 3) +
   scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
   labs(color = 'xCR') +
-  geom_text(aes(x = 63, y = 73, label = 'Player 5722: 11th CAA (1.16)'), color = 'black', size = 10)
+  geom_text(aes(x = 63, y = 71, label = 'Player 5722: 11th CAA (1.16)'), color = 'black', size = 10)
 ggsave('eleventh_best_CAA_plot.png', eleventh_best_CAA_plot)
 ```
 
@@ -135,7 +135,7 @@ worst_CAA_uncaught_throws <- throws_info_with_xcR %>%
   left_join(throws_to_first, worst_CAA_uncaught_throws, by = c('game_str', 'play_id')) %>%
   group_by(game_str, play_id) %>%
   slice_min(order_by = ball_dist)
-worst_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(worst_CAA_caught_throws$ball_x), max(worst_CAA_caught_throws$ball_x)), ylims = c(min(worst_CAA_caught_throws$ball_y) - 2, max(worst_CAA_caught_throws$ball_y) + 3)) +
+worst_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlims = c(min(eleventh_best_CAA_caught_throws$ball_x), max(eleventh_best_CAA_caught_throws$ball_x)), ylims = c(min(eleventh_best_CAA_caught_throws$ball_y) - 2, max(eleventh_best_CAA_caught_throws$ball_y) + 3)) +
   geom_point(data = worst_CAA_caught_throws,
              aes(x = ball_x,
                  y = ball_y,
@@ -149,7 +149,7 @@ worst_CAA_plot <- geom_baseball(league = 'milb', display_range = 'infield', xlim
              shape = 18) +
   scale_color_gradient(limits = c(0, 1), low = 'red', high = 'blue') +
   labs(color = 'xCR') +
-  geom_text(aes(x = 60.25, y = 69.5, label = 'Player 5524: Worst CAA (-2.03)'), color = 'black', size = 7)
+  geom_text(aes(x = 63, y = 71, label = 'Player 5524: Worst CAA (-2.03)'), color = 'black', size = 10)
 ggsave('worst_CAA_plot.png', worst_CAA_plot)
 ```
 
