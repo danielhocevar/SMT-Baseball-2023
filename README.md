@@ -2,6 +2,8 @@
 
 ### Submssion for the 2023 SMT Data Challenge - Graduate Student Division
 
+![IMG_5837](https://github.com/danielhocevar/SMT-Baseball-2023/assets/111665282/ca65d6ff-edac-49c2-94ad-9362c74f2d08)
+
 ## Repository Information
 
 -  `Project.pdf` contains the paper, which has a hyperlink to `Example Play.gif`.
